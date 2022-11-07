@@ -1,5 +1,5 @@
 import sys
-import os
+import argparse
 import pennylane as qml
 from pennylane import numpy as np
 import torch
@@ -7,45 +7,71 @@ import gc
 from timeit import default_timer as timer
 from datetime import datetime, timedelta
 
-from utils import clustered_chain_graph, get_qaoa_circuit
-
-from ray import train
-
-########################################################################
-# Execution env setup
-########################################################################
-split = 1 # number of gpus per tape execution (can be fractional)
-
-r = 3 # number of clusters
-n = 20  # nodes in clusters
-k = 1  # vertex separators
-
-layers = 2 
-
-time_stamp = datetime.now().strftime('%Y-%m-%d-%H:%M:%S')
-filename = f"./data/optimisation/opt_p={layers}_r={r}_n={n}_k={k}_{time_stamp}"
-sys.stdout = open(filename, 'w')
-
-print(f"\nProblem graph with {r} clusters of {n} nodes and {k} vertex separators", flush=True)
-
-q1 = 0.7
-q2 = 0.3
-
-seed = 1967
-
-G, cluster_nodes, separator_nodes = clustered_chain_graph(n, r, k, q1, q2, seed=seed)
+from utils import clustered_chain_graph, get_qaoa_circuit, grad_reduction_qaoa_circuit
 
 import ray
-ray.init() # Should be updated according to system config
 
-print("Nodes in the Ray cluster:", flush=True)
-print(ray.nodes(), flush=True)
+seed = 1967
+split_gpu = 0  # number of gpus per tape execution (can be fractional). Set as zero for cpu only.
 
-print(f"\ncluster resources: {ray.available_resources()}", flush=True)
-print(f"\nresources: {ray.available_resources()}", flush=True)
 
-frag_wires = n + (3*layers -1)*k  # number of wires on biggest fragment
-print(f"\nSimulating {frag_wires} qubits for largest fragment\n", flush=True)
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--device_name",
+        type=str,
+        default="lightning.qubit",
+        const="lightning.qubit",
+        nargs="?",
+        choices=("lightning.qubit", "lightning.gpu", "lightning.kokkos", "default.qubit"),
+        help="PennyLane device name.",
+    )
+
+    # qml.gradients method names
+    parser.add_argument(
+        "--diff_method",
+        type=str,
+        default="param_shift",
+        const="param_shift",
+        nargs="?",
+        choices=("param_shift", "finite_diff"),
+        help="The method of differentiation to be used by the QNode.",
+    )
+
+    # QAOA Hamiltonian configuration:
+    parser.add_argument(
+        "--layers", type=int, default=2, help="Number of repetition layers."
+    )
+
+    # Graph configuration:
+    parser.add_argument(
+        "--num_clusters", type=int, default=2, help="Number of graph nodes."
+    )  # r
+
+    parser.add_argument(
+        "--nodes_per_cluster",
+        type=int,
+        default=2,
+        help="Number of nodes within each cluster.",
+    )  # n
+
+    parser.add_argument(
+        "--vertex_separators",
+        type=int,
+        default=1,
+        help="Vertex separators between each cluster.",
+    )  # k
+
+    parser.add_argument(
+        "--intra_cluster_edge_prob",
+        type=float,
+        default=0.7,
+        help="Probability of having an intra cluster edge.",
+    )  # q1
+
+    return parser.parse_args()
+
 
 def find_depth(tapes):
     # Assuming the same depth for all configurations of largest fragments
@@ -56,163 +82,234 @@ def find_depth(tapes):
         wire_num = len(tpe.wires)
         if wire_num > largest_width:
             largest_width = wire_num
-            largest_frag = tpe  
-            
+            largest_frag = tpe
+
     return (largest_frag.specs["depth"], max(all_depths))
 
-@ray.remote(num_gpus=split)
-def execute_tape(tape):
-    dev = qml.device("lightning.gpu", wires=frag_wires)
+
+########################################################################
+# Execute methods
+########################################################################
+@ray.remote(num_gpus=split_gpu)
+def execute_tape(tape, device_name, frag_wires):
+    dev = qml.device(device_name, wires=frag_wires)
     res = dev.execute(tape)
     del dev
     gc.collect()
     torch.cuda.empty_cache()
     return res
 
-@ray.remote(num_gpus=split)
-def execute_tape_jac(tape):
-    dev = qml.device("lightning.gpu", wires=frag_wires)
+
+@ray.remote(num_gpus=split_gpu)
+def execute_tape_jac(tape, device_name, frag_wires):
+    dev = qml.device(device_name, wires=frag_wires)
     return dev.adjoint_jacobian(tape)
+
 
 ########################################################################
 # Add samples Ray calls for S/R and for circuit execution
 ########################################################################
 class RayExecutor(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, params, tape):
+    def forward(ctx, params, tape, frag_wires, device_name):
         ctx.tape = tape
-        return execute_tape.remote(tape)
+        ctx.device_name = device_name
+        ctx.frag_wires = frag_wires
+        return execute_tape.remote(tape, ctx.device_name, ctx.frag_wires)
 
     @staticmethod
     def backward(ctx, dy):
-        jac = torch.tensor(ray.get(execute_tape_jac.remote(ctx.tape)), requires_grad=True)
+        jac = torch.tensor(
+            ray.get(execute_tape_jac.remote(ctx.tape, ctx.device_name, ctx.frag_wires)),
+            requires_grad=True,
+        )
         return dy * jac, None
-        
-########################################################################
-# Immitate NN functionality and register methods to autograd
-########################################################################
-class CircNetFull(torch.nn.Module):
+
+
+def QAOA_cost(args, frag_wires, params):
     """
-    Executes a QAOA circuit for a given set of parameters and returns a cost 
-    (energy) value.
+    Executes the QAOA circuit for a given set of parameters and returns a cost value.
     """
-    
-    def __init__(self):
-        super().__init__()
+    G, cluster_nodes, separator_nodes = clustered_chain_graph(
+        args.nodes_per_cluster,
+        args.num_clusters,
+        args.vertex_separators,
+        args.intra_cluster_edge_prob,
+        1 - args.intra_cluster_edge_prob,
+        seed=seed,
+    )
+    circuit = get_qaoa_circuit(G, cluster_nodes, separator_nodes, params, args.layers)
 
-    def forward(self, params):
-        circuit = get_qaoa_circuit(G, cluster_nodes, separator_nodes, params, layers)
-        
-        start_frag = timer()
-        
-        print(f"\nFinding fragments ... ", flush=True)
-        fragment_configs, processing_fn = qml.cut_circuit(circuit, device_wires=range(frag_wires))
-        end_frag = timer()
-        elapsed_frag = end_frag - start_frag
-        format_frag = str(timedelta(seconds=elapsed_frag))
-        print(f"\nFragmentation time: {format_frag}")
-        
-        print(f"\nTotal number of fragment tapes = {len(fragment_configs)}", flush=True)
-        
-        frag_depth, deepest_tape = find_depth(fragment_configs)
-        print(f"\nDepth of largest fragment = {frag_depth}", flush=True)
-        print(f"\nDepth of deepest tape = {deepest_tape}", flush=True)
-        
-        start_cut = timer()
-        results = ray.get([RayExecutor.apply(t.get_parameters(), t) for t in fragment_configs])
-        
-        end_cut = timer()
-        elapsed_cut = end_cut - start_cut
-        format_cut = str(timedelta(seconds=elapsed_cut))
-        print(f"\nCircuit cutting time: {format_cut}", flush=True)
-        
-        return (sum(processing_fn(results)))
+    start_frag = timer()
+
+    print(f"Finding fragments ... ", flush=True)
+    fragment_configs, processing_fn = qml.cut_circuit(
+        circuit, device_wires=range(frag_wires)
+    )
+    end_frag = timer()
+    elapsed_frag = end_frag - start_frag
+    format_frag = str(timedelta(seconds=elapsed_frag))
+    print(f"Fragmentation time: {format_frag}")
+
+    print(f"Total number of fragment tapes = {len(fragment_configs)}", flush=True)
+
+    frag_depth, deepest_tape = find_depth(fragment_configs)
+    print(f"Depth of largest fragment = {frag_depth}", flush=True)
+    print(f"Depth of deepest tape = {deepest_tape}", flush=True)
+
+    start_cut = timer()
+    results = ray.get(
+        [
+            RayExecutor.apply(t.get_parameters(), t, frag_wires, args.device_name)
+            for t in fragment_configs
+        ]
+    )
+
+    end_cut = timer()
+    elapsed_cut = end_cut - start_cut
+    format_cut = str(timedelta(seconds=elapsed_cut))
+    print(f"Circuit cutting time: {format_cut}", flush=True)
+
+    print("results", results)
+    print("processing_fn(results)", processing_fn(results))
+    return np.sum(processing_fn(results))
 
 
 ########################################################################
-# Gradients 
+# Gradients
 ########################################################################
-def execute_grad(params, circuit):
+def execute_grad(params, args, frag_wires, graph_data):
     """
     Function to find and execute gradient tapes
     """
-
     start_grad = timer()
-    delta = 0.001
-    
-    forward_tapes = []
-    backward_tapes = []
-    shifted = params.copy()
-    
-    for l in range(len(shifted)): # iterate over layers
-        for i in range(len(shifted[l])): # iterate over params
-            
-            shifted[l][i] += delta / 2
-            forward = get_qaoa_circuit(G, cluster_nodes, separator_nodes, shifted, layers)
-            forward_tapes.append(forward)
-            
-            shifted[l][i] -= delta
-            backward = get_qaoa_circuit(G, cluster_nodes, separator_nodes, shifted, layers)
-            backward_tapes.append(backward)
-    
-    grad_circs = forward_tapes + backward_tapes
-    print(f"\nTotal number of gradient circuits = {len(grad_circs)}", flush=True)
-    print("\nFinding gradient fragments ...", flush=True)
 
-    f_res = []
-    for f_circ in forward_tapes:
-        fragment_configs, processing_fn = qml.cut_circuit(f_circ, device_wires=range(frag_wires))
-        f_results = ray.get([RayExecutor.apply(t.get_parameters(), t) for t in fragment_configs])
-        f_res.append(sum(processing_fn(f_results)))
-        
-    b_res = []
-    for b_circ in backward_tapes:
-        fragment_configs, processing_fn = qml.cut_circuit(b_circ, device_wires=range(frag_wires))
-        b_results = ray.get([RayExecutor.apply(t.get_parameters(), t) for t in fragment_configs])
-        b_res.append(sum(processing_fn(b_results)))
+    print(f"Creating gradient tapes...", flush=True)
 
-    grads = []
-    for fwd, bkwd in zip(f_res, b_res):
-        val = (fwd - bkwd) /delta
-        grads.append(val)
-    
+    qaoa_tape = get_qaoa_circuit(
+        graph_data["G"],
+        graph_data["cluster_nodes"],
+        graph_data["separator_nodes"],
+        params,
+        args.layers,
+    )
+
+    gradient_tapes, fn_grad = getattr(qml.gradients, args.diff_method)(qaoa_tape)
+
+    print(f"Total number of gradient tapes = {len(gradient_tapes)}", flush=True)
+
+    print("Finding and executing gradient fragments...", flush=True)
+
+    grad_res = []
+    for grad_tape in gradient_tapes:
+        fragment_tapes, fn_cut = qml.cut_circuit(
+            grad_tape, device_wires=range(frag_wires)
+        )
+        results = ray.get(
+            [
+                RayExecutor.apply(t.get_parameters(), t, frag_wires, args.device_name)
+                for t in fragment_tapes
+            ]
+        )
+        grad_res.append(sum(fn_cut(results)))
+
+    final_grad = fn_grad(grad_res)
+
     end_grad = timer()
-    elapsed_grad = end_grad - start_grad
-    format_grad = str(timedelta(seconds=elapsed_grad))
-    print(f"\nGradient evaluation time: {format_grad}", flush=True)
-    
-    return np.array(grads).reshape(params.shape)
-        
-def grad_descent():
+    formated_time = str(timedelta(seconds=(end_grad - start_grad)))
+    print(f"Gradient evaluation time: {formated_time}", flush=True)
+
+    return grad_reduction_qaoa_circuit(
+        graph_data["G"],
+        graph_data["cluster_nodes"],
+        graph_data["separator_nodes"],
+        final_grad,
+        params,
+    )
+
+
+def grad_descent(steps, args, frag_wires, graph_data):
     """
-    Function to perform gradient gradient descent
+    Function to perform gradient descent
     """
-    init_params = np.array([[0.15, 0.2]] * layers, requires_grad=True)
-    print(f"\nInitial params: {init_params}")
-    circuit = get_qaoa_circuit(G, cluster_nodes, separator_nodes, init_params, layers)
-    
-    print(f"\nTotal number of qubits = {len(circuit.wires)}", flush=True)
+    init_params = np.array([[0.15, 0.2]] * args.layers, requires_grad=True)
+    print(f"Initial params: {init_params}")
+
+    circuit = get_qaoa_circuit(
+        graph_data["G"],
+        graph_data["cluster_nodes"],
+        graph_data["separator_nodes"],
+        init_params,
+        args.layers,
+    )
+
+    print(f"Total number of qubits = {len(circuit.wires)}", flush=True)
     full_depth = circuit.specs["depth"]
-    print(f"\nDepth of full (uncut) circuit = {full_depth}", flush=True)
+    print(f"Depth of full (uncut) circuit = {full_depth}", flush=True)
 
     params = init_params
     start_opt = timer()
-    
-    for i in range(20):
-        print(f"\nStep {i}:")
-        print(f"\nNumber of params = {params.size}", flush=True)
-        en = CircNetFull()(params)
-        print(f"\nEnergy at step {i} = {en}", flush=True)
-        grad = execute_grad(params, circuit)
-        print(f"\nGrad len = {len(grad)}", flush=True)
-        params -= 0.0001*grad
-            
+
+    for i in range(steps):
+        print(f"\n=====================================")
+        print(f"Step {i+1}/{steps}:")
+        print(f"Number of params = {params.size}", flush=True)
+        cost = QAOA_cost(args, frag_wires, params)
+        print(f"Cost at step {i} = {cost}", flush=True)
+        grad = execute_grad(params, args, frag_wires, graph_data)
+        print(f"Grad len = {len(grad)}", flush=True)
+        params -= 0.0001 * grad
+    print(f"=====================================")
+
+    print(f"\nFinal report:", flush=True)
     end_opt = timer()
     elapsed_opt = end_opt - start_opt
     format_opt = str(timedelta(seconds=elapsed_opt))
-    print(f"\nOptimisation time: {format_opt}", flush=True)
-    
-    print(f"\nFinal full parameters {params}", flush=True)
-    print(f"\n Final cost = {en}", flush=True)
-    
-grad_descent()
+    print(f"Optimization time: {format_opt}", flush=True)
+
+    print(f"Final full parameters {params}", flush=True)
+    print(f"Final cost = {cost}", flush=True)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    time_stamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+    filename = f"./data/optimisation/opt_p={args.layers}_r={args.num_clusters}_n={args.nodes_per_cluster}_k={args.vertex_separators}_{time_stamp}.out"
+    sys.stdout = open(filename, "w")
+
+    ray.init()  # Should be updated according to system config
+
+    print("\nNodes in the Ray cluster:", flush=True)
+    print(ray.nodes(), flush=True)
+
+    print(f"cluster resources: {ray.available_resources()}", flush=True)
+    print(f"resources: {ray.available_resources()}", flush=True)
+
+    print(
+        "Problem: Graph with,",
+        args.num_clusters,
+        "clusters of ",
+        args.nodes_per_cluster,
+        "nodes and",
+        args.vertex_separators,
+        "vertex separators",
+        flush=True,
+    )
+
+    frag_wires = (
+        args.nodes_per_cluster + (3 * args.layers - 1) * args.vertex_separators
+    )  # number of wires on biggest fragment
+    print(f"\nSimulating {frag_wires} qubits for largest fragment", flush=True)
+
+    G, cluster_nodes, separator_nodes = clustered_chain_graph(
+        args.nodes_per_cluster,  # n
+        args.num_clusters,  # r
+        args.vertex_separators,  # k
+        args.intra_cluster_edge_prob,  # q1
+        1 - args.intra_cluster_edge_prob,  # q2
+        seed=seed,
+    )
+    graph_data = dict(G=G, cluster_nodes=cluster_nodes, separator_nodes=separator_nodes)
+
+    grad_descent(steps=1, args=args, frag_wires=frag_wires, graph_data=graph_data)

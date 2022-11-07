@@ -42,10 +42,12 @@ def clustered_chain_graph(
     G = nx.disjoint_union_all(clusters + separators)
 
     cluster_nodes = [
-        [n[0] for n in G.nodes(data="subgraph") if n[1] == f"cluster_{i}"] for i in range(r)
+        [n[0] for n in G.nodes(data="subgraph") if n[1] == f"cluster_{i}"]
+        for i in range(r)
     ]
     separator_nodes = [
-        [n[0] for n in G.nodes(data="subgraph") if n[1] == f"separator_{i}"] for i in range(r - 1)
+        [n[0] for n in G.nodes(data="subgraph") if n[1] == f"separator_{i}"]
+        for i in range(r - 1)
     ]
 
     rng = np.random.default_rng(seed)
@@ -67,16 +69,16 @@ def get_qaoa_circuit(
     layers: int = 1,
 ) -> qml.tape.QuantumTape:
     """
-    Function to build QAOA max-cut circuit tape from graph including `WireCut` 
+    Function to build QAOA max-cut circuit tape from graph including `WireCut`
     operations
-    
+
     Args:
         G (nx.Graph): problem graph to be solved using QAOA
         cluster_nodes (List[List[int]]): nodes of the clusters within the graph
         separator_nodes (List[List[int]]): nodes of the separators in the graph
         params (Tuple[Tuple[float]]): parameters of the QAOA circuit to be optimized
         layers (int): number of layer in the QAOA circuit
-        
+
     Returns:
         QuantumTape: the QAOA tape containing `WireCut` operations
     """
@@ -110,19 +112,83 @@ def get_qaoa_circuit(
                 subgraph = G.subgraph(nodes)
 
                 for edge in subgraph.edges:
-                    qml.IsingZZ(2*gamma, wires=edge) # multiply param by 2 for consistency with analytic cost
+                    qml.IsingZZ(
+                        2 * gamma, wires=edge
+                    )  # multiply param by 2 for consistency with analytic cost
 
             # mixer layer
             for w in range(wires):
-                qml.RX(2*beta, wires=w)
-
+                qml.RX(2 * beta, wires=w)
 
             # reset cuts
             if l < layers - 1:
                 for s in separator_nodes:
                     qml.WireCut(wires=s)
 
-        [qml.expval(op) for op in cost.ops if not isinstance(op, qml.ops.identity.Identity)]
-
+        [
+            qml.expval(op)
+            for op in cost.ops
+            if not isinstance(op, qml.ops.identity.Identity)
+        ]
 
     return tape
+
+
+def grad_reduction_qaoa_circuit(
+    G: nx.Graph,
+    cluster_nodes: List[List[int]],
+    separator_nodes: List[List[int]],
+    full_grad: Tuple[float],
+    params: Tuple[Tuple[float]],
+) -> Tuple[Tuple[float]]:
+    """
+    Reduces the full array of gradients of a QAOA max-cut circuit tape from a graph,
+    to an array of gradients for independent variables.
+    This array will be shaped by params.
+
+    Args:
+        G (nx.Graph): problem graph to be solved using QAOA.
+        cluster_nodes (List[List[int]]): nodes of the clusters within the graph.
+        separator_nodes (List[List[int]]): nodes of the separators in the graph.
+        full_grad (Tuple[float]): full array of gradients.
+        params (Tuple[Tuple[float]]): array with parameters.
+
+    Returns:
+        Tuple[Tuple[float]]: Reduced array with gradients of non-equivalent variables,
+        shaped by the params array.
+    """
+
+    wires = len(G)
+    r = len(cluster_nodes)
+    layers = len(params)
+
+    red_grad = np.zeros_like(params)
+
+    pos = 0  # position in the full_grad array.
+    for l in range(layers):
+        for i, c in enumerate(cluster_nodes):
+            if i == 0:
+                current_separator = []
+                next_separator = separator_nodes[0]
+            elif i == r - 1:
+                current_separator = separator_nodes[-1]
+                next_separator = []
+            else:
+                current_separator = separator_nodes[i - 1]
+                next_separator = separator_nodes[i]
+
+            for cs in current_separator:
+                qml.WireCut(wires=cs)
+
+            nodes = c + current_separator + next_separator
+            subgraph = G.subgraph(nodes)
+
+            for _ in subgraph.edges:
+                red_grad[l, 0] += full_grad[pos]  # gamma param is the first (0)
+                pos += 1
+
+        # mixer layer
+        for _ in range(wires):
+            red_grad[l, 1] += full_grad[pos]  # beta param is the second (1)
+            pos += 1
+    return red_grad
