@@ -67,7 +67,7 @@ def parse_args():
         "--intra_cluster_edge_prob",
         type=float,
         default=0.7,
-        help="Probability of having an intra cluster edge.",
+        help="Probability of having an intra-cluster edge.",
     )  # q1
 
     return parser.parse_args()
