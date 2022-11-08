@@ -4,7 +4,7 @@
 
 <p float="left">
   <img src="./static/shots_vs_cost_left.png" width="300" />
-  <img src="./static/shots_vs_cost_right.png" width="300" /> 
+  <img src="./static/shots_vs_cost_right.png" width="300" />
 </p>
 
 - Large scale QAOA simulations using circuit cutting methods executed over multiple GPUs.
@@ -16,18 +16,18 @@
 
 <p float="left">
   <img src="./static/multi_opt.png" width="300" />
-  <img src="./static/scaling_vs_gpu_nodes.png" width="300" /> 
+  <img src="./static/scaling_vs_gpu_nodes.png" width="300" />
 </p>
 
 ### Contents
 
-- `optimize.py`: Python script for performing full QAOA distributed over multiple GPUs using circuit cutting methods. This was used to produce the results in the accompanying paper.
+- `optimize.py`: Python script for performing full QAOA distributed over multiple GPUs/CPUs using circuit cutting methods, and native pennylane differentiation methods.
 
 - `forward_pass.py`: Python script for executing forward passes of QAOA circuits (no gradients/optimization) distributed over multiple GPUs using circuit cutting methods.
 
 - `exact_costs.ipynb`: Jupyter notebook for analysis of exact cost values of single layer QAOA circuits. This uses results from this [paper](https://arxiv.org/pdf/2009.01760.pdf) and the accompanying [repository](https://github.com/Matematija/QubitRBM)
 
-- `utils.py`: Python script containing utility functions for constructing problem graphs to be input to QAOA for Max-Cut and building the corresponding quantum circuit. 
+- `utils.py`: Python script containing utility functions for constructing problem graphs to be input to QAOA for Max-Cut and building the corresponding quantum circuit.
 
 - `data/`: Folder containing example output logs generated from above scripts. This data was used to generate the plots in the accompanying paper.
 
@@ -66,17 +66,23 @@ You can also visit [pennylane.xanadu.ai](https://pennylane.xanadu.ai) to run not
 
 ### Requirements
 
-All software requirements for running the provided python scripts can be installed by running the following command from the top level directory: 
+All software requirements for running the provided python scripts on GPUS can be installed by running the following command from the top level directory:
 
 ```
 $ pip install -r requirements.txt
 ```
 
-This requires [`pip`](https://pip.pypa.io/en/stable/installation/)  to be installed on your machine. 
+For running on CPUs:
 
-We also recommend the use of a virtual environment (e.g [`venv`](https://docs.python.org/3/library/venv.html)) when installing these requirements. 
+```
+$ pip install -r requirements-lightning.txt
+```
 
-Note that the PennyLane dependency is installed from a development branch containing the necessary updates to perform efficient measurements of the cost Hamiltonians used in the QAOA circuit simulations. 
+This requires [`pip`](https://pip.pypa.io/en/stable/installation/)  to be installed on your machine.
+
+We also recommend the use of a virtual environment (e.g [`venv`](https://docs.python.org/3/library/venv.html)) when installing these requirements.
+
+Note that the PennyLane dependency is installed from a development branch containing the necessary updates to perform efficient measurements of the cost Hamiltonians used in the QAOA circuit simulations.
 
 Additionally, if running the notebook `exact_costs.ipynb`, this will require an additional installation of the code available in this [repository](https://github.com/Matematija/QubitRBM) that is not included in the requirements.
 
