@@ -24,7 +24,12 @@ def parse_args():
         default="lightning.qubit",
         const="lightning.qubit",
         nargs="?",
-        choices=("lightning.qubit", "lightning.gpu", "lightning.kokkos", "default.qubit"),
+        choices=(
+            "lightning.qubit",
+            "lightning.gpu",
+            "lightning.kokkos",
+            "default.qubit",
+        ),
         help="PennyLane device name.",
     )
 
@@ -40,14 +45,10 @@ def parse_args():
     )
 
     # QAOA Hamiltonian configuration:
-    parser.add_argument(
-        "--layers", type=int, default=2, help="Number of repetition layers."
-    )
+    parser.add_argument("--layers", type=int, default=2, help="Number of repetition layers.")
 
     # Graph configuration:
-    parser.add_argument(
-        "--num_clusters", type=int, default=2, help="Number of graph nodes."
-    )  # r
+    parser.add_argument("--num_clusters", type=int, default=2, help="Number of graph nodes.")  # r
 
     parser.add_argument(
         "--nodes_per_cluster",
@@ -143,9 +144,7 @@ def QAOA_cost(args, frag_wires, params):
     start_frag = timer()
 
     print(f"Finding fragments ... ", flush=True)
-    fragment_configs, processing_fn = qml.cut_circuit(
-        circuit, device_wires=range(frag_wires)
-    )
+    fragment_configs, processing_fn = qml.cut_circuit(circuit, device_wires=range(frag_wires))
     end_frag = timer()
     elapsed_frag = end_frag - start_frag
     format_frag = str(timedelta(seconds=elapsed_frag))
@@ -169,9 +168,6 @@ def QAOA_cost(args, frag_wires, params):
     elapsed_cut = end_cut - start_cut
     format_cut = str(timedelta(seconds=elapsed_cut))
     print(f"Circuit cutting time: {format_cut}", flush=True)
-
-    print("results", results)
-    print("processing_fn(results)", processing_fn(results))
     return np.sum(processing_fn(results))
 
 
@@ -202,9 +198,7 @@ def execute_grad(params, args, frag_wires, graph_data):
 
     grad_res = []
     for grad_tape in gradient_tapes:
-        fragment_tapes, fn_cut = qml.cut_circuit(
-            grad_tape, device_wires=range(frag_wires)
-        )
+        fragment_tapes, fn_cut = qml.cut_circuit(grad_tape, device_wires=range(frag_wires))
         results = ray.get(
             [
                 RayExecutor.apply(t.get_parameters(), t, frag_wires, args.device_name)
@@ -219,7 +213,9 @@ def execute_grad(params, args, frag_wires, graph_data):
     formated_time = str(timedelta(seconds=(end_grad - start_grad)))
     print(f"Gradient evaluation time: {formated_time}", flush=True)
 
-    return grad_reduction_qaoa_circuit(
+    # When building the QAOA circuit, for consistency with analytic results, we multiply the parameters by 2.
+    # Because of that, we divide the gradients by 2 here, so we can update the original parameters.
+    return 0.5 * grad_reduction_qaoa_circuit(
         graph_data["G"],
         graph_data["cluster_nodes"],
         graph_data["separator_nodes"],
@@ -233,7 +229,8 @@ def grad_descent(steps, args, frag_wires, graph_data):
     Function to perform gradient descent
     """
     init_params = np.array([[0.15, 0.2]] * args.layers, requires_grad=True)
-    print(f"Initial params: {init_params}")
+    print(f"Initial params:")
+    print(init_params)
 
     circuit = get_qaoa_circuit(
         graph_data["G"],
@@ -267,7 +264,9 @@ def grad_descent(steps, args, frag_wires, graph_data):
     format_opt = str(timedelta(seconds=elapsed_opt))
     print(f"Optimization time: {format_opt}", flush=True)
 
-    print(f"Final full parameters {params}", flush=True)
+    print(f"Final full parameters:", flush=True)
+    print(params, flush=True)
+
     print(f"Final cost = {cost}", flush=True)
 
 
