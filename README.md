@@ -86,13 +86,15 @@ Note that the PennyLane dependency is installed from a development branch contai
 
 Additionally, if running the notebook `exact_costs.ipynb`, this will require an additional installation of the code available in this [repository](https://github.com/Matematija/QubitRBM) that is not included in the requirements.
 
-### Authors
-
-Angus Lowe, Matija Medvidovi&#263;, Anthony Hayes, Lee J. O’Riordan, Thomas R. Bromley, Juan Miguel Arrazola, and Nathan Killoran
+### Original paper
 
 If you are doing any research using this source code, please cite the following paper:
 
 > Angus Lowe, Matija Medvidovi&#263;, Anthony Hayes, Lee J. O’Riordan, Thomas R. Bromley, Juan Miguel Arrazola, and Nathan Killoran. _Fast quantum circuit cutting with randomized measurements_. [arXiv:2207.14734](https://arxiv.org/abs/2207.14734) (2022).
+
+### Contributors (alphabetical order)
+
+Thomas R. Bromley, Amintor Dusko, Anthony Hayes, Nathan Killoran, Angus Lowe, Matija Medvidovi&#263;, Juan Miguel Arrazola, and Lee J. O’Riordan.
 
 ### License
 
