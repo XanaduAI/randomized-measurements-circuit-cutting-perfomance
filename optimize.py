@@ -3,7 +3,6 @@ import argparse
 import pennylane as qml
 from pennylane import numpy as np
 import torch
-import gc
 from timeit import default_timer as timer
 from datetime import datetime, timedelta
 
@@ -12,8 +11,6 @@ from utils import clustered_chain_graph, get_qaoa_circuit, grad_reduction_qaoa_c
 import ray
 
 seed = 1967
-split_gpu = 0  # number of gpus per tape execution (can be fractional). Set as zero for cpu only.
-
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -71,6 +68,13 @@ def parse_args():
         help="Probability of having an intra-cluster edge.",
     )  # q1
 
+    parser.add_argument(
+        "--num_gpus",
+        type=float,
+        default=0.0,
+        help="Number of gpus per tape execution (can be fractional). Set as zero for cpu only.",
+    )  # gpu control
+
     return parser.parse_args()
 
 
@@ -91,37 +95,43 @@ def find_depth(tapes):
 ########################################################################
 # Execute methods
 ########################################################################
-@ray.remote(num_gpus=split_gpu)
-def execute_tape(tape, device_name, frag_wires):
+def _execute_tape(tape, device_name, frag_wires):
     dev = qml.device(device_name, wires=frag_wires)
     res = dev.execute(tape)
-    del dev
-    gc.collect()
-    torch.cuda.empty_cache()
     return res
 
+def execute_tape(_num_gpus):
+    if (_num_gpus == None) or (_num_gpus == 0):
+        return ray.remote(_execute_tape)
+    else:
+        return ray.remote(num_gpus=_num_gpus, max_calls=1)(_execute_tape)
 
-@ray.remote(num_gpus=split_gpu)
-def execute_tape_jac(tape, device_name, frag_wires):
+def _execute_tape_jac(tape, device_name, frag_wires):
     dev = qml.device(device_name, wires=frag_wires)
     return dev.adjoint_jacobian(tape)
 
+def execute_tape_jac(_num_gpus):
+    if (_num_gpus == None):
+        return ray.remote(_execute_tape_jac)
+    else:
+        return ray.remote(num_gpus=_num_gpus, max_calls=1)(_execute_tape_jac)
 
 ########################################################################
 # Add samples Ray calls for S/R and for circuit execution
 ########################################################################
 class RayExecutor(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, params, tape, frag_wires, device_name):
+    def forward(ctx, params, tape, frag_wires, device_name, num_gpus):
         ctx.tape = tape
         ctx.device_name = device_name
         ctx.frag_wires = frag_wires
-        return execute_tape.remote(tape, ctx.device_name, ctx.frag_wires)
+        ctx.num_gpus = num_gpus
+        return execute_tape(ctx.num_gpus).remote(tape, ctx.device_name, ctx.frag_wires)
 
     @staticmethod
     def backward(ctx, dy):
         jac = torch.tensor(
-            ray.get(execute_tape_jac.remote(ctx.tape, ctx.device_name, ctx.frag_wires)),
+            ray.get(execute_tape_jac(ctx.num_gpus).remote(ctx.tape, ctx.device_name, ctx.frag_wires)),
             requires_grad=True,
         )
         return dy * jac, None
@@ -159,7 +169,7 @@ def QAOA_cost(args, frag_wires, params):
     start_cut = timer()
     results = ray.get(
         [
-            RayExecutor.apply(t.get_parameters(), t, frag_wires, args.device_name)
+            RayExecutor.apply(t.get_parameters(), t, frag_wires, args.device_name, args.num_gpus)
             for t in fragment_configs
         ]
     )
@@ -201,7 +211,7 @@ def execute_grad(params, args, frag_wires, graph_data):
         fragment_tapes, fn_cut = qml.cut_circuit(grad_tape, device_wires=range(frag_wires))
         results = ray.get(
             [
-                RayExecutor.apply(t.get_parameters(), t, frag_wires, args.device_name)
+                RayExecutor.apply(t.get_parameters(), t, frag_wires, args.device_name, args.num_gpus)
                 for t in fragment_tapes
             ]
         )
