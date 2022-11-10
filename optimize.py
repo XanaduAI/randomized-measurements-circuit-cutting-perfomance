@@ -111,7 +111,7 @@ def _execute_tape_jac(tape, device_name, frag_wires):
     return dev.adjoint_jacobian(tape)
 
 def execute_tape_jac(_num_gpus):
-    if (_num_gpus == None):
+    if (_num_gpus == None) or (_num_gpus == 0):
         return ray.remote(_execute_tape_jac)
     else:
         return ray.remote(num_gpus=_num_gpus, max_calls=1)(_execute_tape_jac)
