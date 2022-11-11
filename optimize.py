@@ -13,6 +13,9 @@ import ray
 seed = 1967
 
 
+########################################################################
+# Parsing arguments
+########################################################################
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -94,7 +97,7 @@ def find_depth(tapes):
 
 
 ########################################################################
-# Execute methods
+# Execute method
 ########################################################################
 def _execute_tape(tape, device_name, frag_wires):
     dev = qml.device(device_name, wires=frag_wires)
@@ -109,6 +112,9 @@ def execute_tape(_num_gpus):
         return ray.remote(num_gpus=_num_gpus, max_calls=1)(_execute_tape)
 
 
+########################################################################
+# Cost Value
+########################################################################
 def QAOA_cost(args, frag_wires, params):
     """
     Executes the QAOA circuit for a given set of parameters and returns a cost value.
@@ -154,7 +160,7 @@ def QAOA_cost(args, frag_wires, params):
 
 
 ########################################################################
-# Gradients
+# Gradient calculation
 ########################################################################
 def execute_grad(params, args, frag_wires, graph_data):
     """
@@ -206,6 +212,9 @@ def execute_grad(params, args, frag_wires, graph_data):
     )
 
 
+########################################################################
+# Gradient descent procedure
+########################################################################
 def grad_descent(steps, args, frag_wires, graph_data):
     """
     Function to perform gradient descent
