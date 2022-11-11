@@ -2,7 +2,6 @@ import sys
 import argparse
 import pennylane as qml
 from pennylane import numpy as np
-import torch
 from timeit import default_timer as timer
 from datetime import datetime, timedelta
 
