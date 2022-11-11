@@ -115,19 +115,17 @@ def execute_tape(_num_gpus):
 ########################################################################
 # Cost Value
 ########################################################################
-def QAOA_cost(args, frag_wires, params):
+def QAOA_cost(params, args, frag_wires, graph_data):
     """
     Executes the QAOA circuit for a given set of parameters and returns a cost value.
     """
-    G, cluster_nodes, separator_nodes = clustered_chain_graph(
-        args.nodes_per_cluster,
-        args.num_clusters,
-        args.vertex_separators,
-        args.intra_cluster_edge_prob,
-        1 - args.intra_cluster_edge_prob,
-        seed=seed,
+    circuit = get_qaoa_circuit(
+        graph_data["G"],
+        graph_data["cluster_nodes"],
+        graph_data["separator_nodes"],
+        params,
+        args.layers,
     )
-    circuit = get_qaoa_circuit(G, cluster_nodes, separator_nodes, params, args.layers)
 
     start_frag = timer()
 
@@ -242,7 +240,7 @@ def grad_descent(steps, args, frag_wires, graph_data):
         print(f"\n=====================================")
         print(f"Step {i+1}/{steps}:")
         print(f"Number of params = {params.size}", flush=True)
-        cost = QAOA_cost(args, frag_wires, params)
+        cost = QAOA_cost(params, args, frag_wires, graph_data)
         print(f"Cost at step {i} = {cost}", flush=True)
         grad = execute_grad(params, args, frag_wires, graph_data)
         print(f"Grad len = {len(grad)}", flush=True)
