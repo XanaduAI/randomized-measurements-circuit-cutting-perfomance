@@ -2,4 +2,3 @@ git+https://github.com/PennyLaneAI/pennylane.git@qcut_multiple_paulis
 PennyLane-Lightning~=0.26.0
 ray==1.13
 networkx==2.8
-torch==1.12
