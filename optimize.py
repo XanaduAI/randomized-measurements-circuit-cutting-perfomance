@@ -78,6 +78,14 @@ def parse_args():
         help="Number of gpus per tape execution (can be fractional). Set as zero for cpu only.",
     )  # gpu control
 
+    # Optimization steps
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=2,
+        help="Number of steps in the optimization procedure.",
+    )
+
     return parser.parse_args()
 
 
@@ -212,7 +220,7 @@ def execute_grad(params, args, frag_wires, graph_data):
 ########################################################################
 # Gradient descent procedure
 ########################################################################
-def grad_descent(steps, args, frag_wires, graph_data):
+def grad_descent(args, frag_wires, graph_data):
     """
     Function to perform gradient descent
     """
@@ -235,15 +243,15 @@ def grad_descent(steps, args, frag_wires, graph_data):
     params = init_params
     start_opt = timer()
 
-    for i in range(steps):
+    for i in range(args.steps):
         print(f"\n=====================================")
-        print(f"Step {i+1}/{steps}:")
+        print(f"Step {i+1}/{args.steps}:")
         print(f"Number of params = {params.size}", flush=True)
         cost = QAOA_cost(params, args, frag_wires, graph_data)
         print(f"Cost at step {i} = {cost}", flush=True)
         grad = execute_grad(params, args, frag_wires, graph_data)
         print(f"Grad len = {len(grad)}", flush=True)
-        params -= 0.0001 * grad
+        params -= 0.001 * grad
     print(f"=====================================")
 
     print(f"\nFinal report:", flush=True)
@@ -299,4 +307,4 @@ if __name__ == "__main__":
     )
     graph_data = dict(G=G, cluster_nodes=cluster_nodes, separator_nodes=separator_nodes)
 
-    grad_descent(steps=1, args=args, frag_wires=frag_wires, graph_data=graph_data)
+    grad_descent(args=args, frag_wires=frag_wires, graph_data=graph_data)
